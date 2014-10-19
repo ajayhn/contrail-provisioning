@@ -321,11 +321,13 @@ class Setup(object):
         parser.add_argument("--storage-directory-config", help = "Directories to be sued for distributed storage", nargs="+", type=str)
         parser.add_argument("--collector-hosts", help = "IP Addresses of collector nodes", nargs='+', type=str)
         parser.add_argument("--collector-host-tokens", help = "Passwords of collector nodes", nargs='+', type=str)
+        parser.add_argument("--cfg-host", help = "IP Address of config node")
         parser.add_argument("--live-migration", help = "Live migration enabled")
         parser.add_argument("--nfs-live-migration", help = "NFS for Live migration enabled")
         parser.add_argument("--nfs-livem-subnet", help = "Subnet for NFS for Live migration VM", nargs="+", type=str)
         parser.add_argument("--nfs-livem-image", help = "Image for NFS for Live migration VM", nargs="+", type=str)
         parser.add_argument("--nfs-livem-host", help = "Image for NFS for Live migration VM", nargs="+", type=str)
+        parser.add_argument("--nfs-livem-mount", help = "Mount of external NFS server", nargs="+", type=str)
         parser.add_argument("--add-storage-node", help = "Dynamic addition of storage node")
         parser.add_argument("--storage-webui-ip", help = "IP Address of storage webui node")
         parser.add_argument("--storage-webui-mode", help = "Config mode Storage WebUI Status")
@@ -374,6 +376,19 @@ class Setup(object):
     def setup_crashkernel_params(self):
         local(r"sed -i 's/crashkernel=.*\([ | \"]\)/crashkernel=384M-2G:64M,2G-16G:128M,16G-:256M\1/g' /etc/grub.d/10_linux")
         local("update-grub")
+
+    def enable_kdump(self):
+        '''Enable kdump for centos based systems'''
+        with settings(warn_only=True):
+            status = local("chkconfig --list | grep kdump")
+            if status.failed:
+                print 'WARNING: Seems kexec-tools is not installed. Skipping enable kdump'
+                return False
+        local("chkconfig kdump on")
+        local("service kdump start")
+        local("service kdump status")
+        local("cat /sys/kernel/kexec_crash_loaded")
+        local("cat /proc/iomem | grep Crash")
 
     def enable_kernel_core (self):
         '''
@@ -821,6 +836,12 @@ HWADDR=%s
                     self.setup_crashkernel_params()
             except Exception as e:
                 print "Ignoring failure kernel core dump"
+
+            try:
+                if pdist in ['fedora', 'centos', 'redhat']:
+                    self.enable_kdump()
+            except Exception as e:
+                print "Ignoring failure when enabling kdump"
  
         with settings(warn_only = True):
             # analytics venv instalation
@@ -1283,6 +1304,7 @@ HWADDR=%s
                              '__contrail_ifmap_password__': 'svc-monitor',
                              '__contrail_api_server_ip__': self._args.internal_vip or cfgm_ip,
                              '__contrail_api_server_port__': '8082',
+                             '__contrail_analytics_server_ip__': self._args.internal_vip or self._args.collector_ip,
                              '__contrail_keystone_ip__': keystone_ip,
                              '__contrail_ks_auth_protocol__': ks_auth_protocol,
                              '__contrail_ks_auth_port__': ks_auth_port,
@@ -1788,13 +1810,17 @@ SUBCHANNELS=1,2,3
 
                 if nfs_live_migration_enabled == 'enabled':
                     storage_setup_args = " --storage-master %s" %(self._args.storage_master)
-                    storage_setup_args = storage_setup_args + " --storage-setup-mode %s" % (self._args.storage_setup_mode)    
-                    storage_setup_args = storage_setup_args + " --storage-hostnames %s" %(' '.join(self._args.storage_hostnames))    
-                    storage_setup_args = storage_setup_args + " --storage-hosts %s" %(' '.join(self._args.storage_hosts))    
-                    storage_setup_args = storage_setup_args + " --storage-host-tokens %s" %(' '.join(self._args.storage_host_tokens))    
-                    storage_setup_args = storage_setup_args + " --nfs-livem-subnet %s" %(' '.join(self._args.nfs_livem_subnet))    
-                    storage_setup_args = storage_setup_args + " --nfs-livem-image %s" %(' '.join(self._args.nfs_livem_image))    
-                    storage_setup_args = storage_setup_args + " --nfs-livem-host %s" %(' '.join(self._args.nfs_livem_host))    
+                    storage_setup_args = storage_setup_args + " --storage-setup-mode %s" % (self._args.storage_setup_mode)
+                    storage_setup_args = storage_setup_args + " --storage-hostnames %s" %(' '.join(self._args.storage_hostnames))
+                    storage_setup_args = storage_setup_args + " --storage-hosts %s" %(' '.join(self._args.storage_hosts))
+                    storage_setup_args = storage_setup_args + " --storage-host-tokens %s" %(' '.join(self._args.storage_host_tokens))
+                    if self._args.nfs_livem_subnet:
+                        storage_setup_args = storage_setup_args + " --nfs-livem-subnet %s" \
+                                                                %(' '.join(self._args.nfs_livem_subnet))
+                        storage_setup_args = storage_setup_args + " --nfs-livem-image %s" %(' '.join(self._args.nfs_livem_image))
+                        storage_setup_args = storage_setup_args + " --nfs-livem-host %s" %(' '.join(self._args.nfs_livem_host))
+                    if self._args.nfs_livem_mount:
+                        storage_setup_args = storage_setup_args + " --nfs-livem-mount %s" %(' '.join(self._args.nfs_livem_mount))
                     with settings(host_string=self._args.storage_master):
                         run("python /opt/contrail/contrail_installer/contrail_setup_utils/livemnfs-ceph-setup.py %s" %(storage_setup_args))
             else:
@@ -1826,8 +1852,11 @@ SUBCHANNELS=1,2,3
                     storage_setup_args = storage_setup_args + " --storage-local-ssd-disk-config %s" %(' '.join(self._args.storage_local_ssd_disk_config))
                     storage_setup_args = storage_setup_args + " --storage-nfs-disk-config %s" %(' '.join(self._args.storage_nfs_disk_config))
                     storage_setup_args = storage_setup_args + " --storage-directory-config %s" %(' '.join(self._args.storage_directory_config))
-                    storage_setup_args = storage_setup_args + " --collector-hosts %s" %(' '.join(self._args.collector_hosts))
-                    storage_setup_args = storage_setup_args + " --collector-host-tokens %s" %(' '.join(self._args.collector_host_tokens))
+                    if self._args.collector_hosts:
+                        storage_setup_args = storage_setup_args + " --collector-hosts %s" %(' '.join(self._args.collector_hosts))
+                        storage_setup_args = storage_setup_args + " --collector-host-tokens %s" %(' '.join(self._args.collector_host_tokens))
+                    if self._args.cfg_host:
+                        storage_setup_args = storage_setup_args + " --cfg-host %s" %(self._args.cfg_host)
                     with settings(host_string=self._args.storage_master):
                         run("python /opt/contrail/contrail_installer/contrail_setup_utils/storage-ceph-setup.py %s" %(storage_setup_args))
 
@@ -1994,9 +2023,12 @@ class OpenstackGaleraSetup(Setup):
             wsrep_cluster_address= ''
         else:
             wsrep_cluster_address =  (':4567,'.join(self._args.galera_ip_list) + ':4567')
+
         template_vals = {'__wsrep_nodes__' : wsrep_cluster_address,
                          '__wsrep_node_address__' : self._args.openstack_ip,
-                         '__mysql_token__' : self.mysql_token
+                         '__mysql_token__' : self.mysql_token,
+                         '__wsrep_cluster_size__': len(self._args.galera_ip_list),
+                         '__wsrep_inc_offset__': self._args.openstack_index*10,
                         }
         self._template_substitute_write(wsrep_template, template_vals,
                                 self._temp_dir_name + '/%s' % wsrep_conf_file)
